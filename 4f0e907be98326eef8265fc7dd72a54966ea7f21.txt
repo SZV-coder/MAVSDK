@@ -1,0 +1,81 @@
+from contextlib import contextmanager
+import uuid
+import secrets
+from fastapi import HTTPException, status
+# Assuming these are defined elsewhere in your code:
+# from your_module import UserCreateRequest, UserCreateResponse, User, Config, configdp_run
+# from your_app import app  (or however you've defined your FastAPI app)
+
+
+@contextmanager
+def config_lock(cfg):
+    """
+    Context manager to acquire and release a lock on a configuration object.
+
+    This ensures that operations on the configuration are thread-safe.
+
+    Args:
+        cfg: The configuration object (e.g., an instance of Config).
+
+    Yields:
+        None:  The context manager yields control to the 'with' block.
+
+    """
+    cfg.lock()
+    try:
+        yield
+    finally:
+        cfg.unlock()
+
+
+@app.post("/users", response_model=UserCreateResponse, status_code=status.HTTP_201_CREATED)
+def create_user(request: UserCreateRequest):
+    """
+    Creates a new user in the system.
+
+    This endpoint handles the creation of a new user, including generating a
+    unique ID, hashing the password, validating the user data, saving the
+    user to the configuration, and triggering an event.
+
+    Args:
+        request:  A UserCreateRequest object containing the user's information
+                  (username and origin).
+
+    Returns:
+        UserCreateResponse:  A response object containing the status, user ID,
+                             username, and the raw password (for the client).
+
+    Raises:
+        HTTPException:  If there are validation errors (400 Bad Request) or
+                        if any other error occurs during the process.  The
+                        error details are included in the response.
+    """
+    cfg = Config.getInstance()
+
+    try:
+        with config_lock(cfg):  # Use the context manager
+            user = User()
+            user.name = request.username
+            user.scope = request.origin
+            user.uid = str(uuid.uuid4())
+
+            raw_password = secrets.token_urlsafe(50)
+            user.password = User.generate_password_hash(raw_password)
+
+            errors = user.validate()
+            if errors:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+            cfg.save()
+            configdp_run("auth user changed", [user.name])
+
+            return UserCreateResponse(
+                status="ok",
+                uid=user.uid,
+                name=user.name,
+                password=raw_password
+            )
+
+    except Exception as e:
+        print(f"An error occurred: {e}")  # Replace with proper logging
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {e}") # Added error code and detail
